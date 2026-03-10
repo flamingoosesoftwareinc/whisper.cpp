@@ -50,6 +50,7 @@ struct whisper_params {
     bool flash_attn    = true;
     bool debug         = false;
     bool use_vad       = false;
+    bool output_srt    = false;
 
     std::string language   = "en";
     std::string model      = "models/ggml-base.en.bin";
@@ -106,6 +107,7 @@ static bool whisper_params_parse(int argc, char ** argv, whisper_params & params
         else if (arg == "--format")                           { params.format        = argv[++i]; }
         else if (arg == "--sample-rate")                      { params.sample_rate   = std::stoi(argv[++i]); }
         else if (arg == "--debug")                            { params.debug         = true; }
+        else if (arg == "-osrt" || arg == "--output-srt")     { params.output_srt    = true; }
         else if (arg == "--vad")                              { params.use_vad       = true; }
         else if (arg == "--vad-probe-ms")                     { params.vad_probe_ms  = std::stoi(argv[++i]); }
         else if (arg == "--vad-silence-ms")                   { params.vad_silence_ms = std::stoi(argv[++i]); }
@@ -152,6 +154,7 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "  -i PATH,  --input PATH    [%-7s] input path ('-' for stdin)\n",                     params.input.c_str());
     fprintf(stderr, "            --format FMT    [%-7s] input format: f32 or s16 (little-endian)\n",      params.format.c_str());
     fprintf(stderr, "            --sample-rate N [%-7d] input sample rate (must be 16000)\n",             params.sample_rate);
+    fprintf(stderr, "  -osrt,    --output-srt    [%-7s] output in SRT subtitle format\n",                  params.output_srt ? "true" : "false");
     fprintf(stderr, "            --debug         [%-7s] enable debug logging\n",                          params.debug ? "true" : "false");
     fprintf(stderr, "            --vad           [%-7s] enable VAD-based segmentation\n",                 params.use_vad ? "true" : "false");
     fprintf(stderr, "            --vad-probe-ms N   [%-5d] VAD probe chunk size (ms)\n",                    params.vad_probe_ms);
@@ -578,6 +581,7 @@ int main(int argc, char ** argv) {
               params.use_vad ? 1 : 0, params.vad_probe_ms, params.vad_silence_ms, params.vad_pre_roll_ms, std::max(1, std::min(1000, params.vad_probe_ms / 2)));
 
     int n_iter = 0;
+    int srt_seq = 0;
 
     bool is_running = true;
 
@@ -645,27 +649,41 @@ int main(int argc, char ** argv) {
 
         // print result;
         {
-            if (!use_vad) {
-                printf("\33[2K\r");
-
-                // print long empty line to clear the previous line
-                printf("%s", std::string(100, ' ').c_str());
-
-                printf("\33[2K\r");
-            } else {
-                const int64_t t0_ms = std::max<int64_t>(0, seg_start_sample * 1000 / WHISPER_SAMPLE_RATE);
-                const int64_t t1_ms = std::max<int64_t>(0, seg_end_sample * 1000 / WHISPER_SAMPLE_RATE);
-
-                printf("\n");
-                printf("### Transcription %d START | t0 = %d ms | t1 = %d ms\n", n_iter, (int) t0_ms, (int) t1_ms);
-                printf("\n");
+            if (!params.output_srt) {
+                if (!use_vad) {
+                    printf("\33[2K\r");
+                    printf("%s", std::string(100, ' ').c_str());
+                    printf("\33[2K\r");
+                } else {
+                    const int64_t t0_ms = std::max<int64_t>(0, seg_start_sample * 1000 / WHISPER_SAMPLE_RATE);
+                    const int64_t t1_ms = std::max<int64_t>(0, seg_end_sample * 1000 / WHISPER_SAMPLE_RATE);
+                    printf("\n");
+                    printf("### Transcription %d START | t0 = %d ms | t1 = %d ms\n", n_iter, (int) t0_ms, (int) t1_ms);
+                    printf("\n");
+                }
             }
 
             const int n_segments = whisper_full_n_segments(ctx);
             for (int i = 0; i < n_segments; ++i) {
                 const char * text = whisper_full_get_segment_text(ctx, i);
 
-                if (params.no_timestamps) {
+                if (params.output_srt) {
+                    const int64_t t0 = whisper_full_get_segment_t0(ctx, i);
+                    const int64_t t1 = whisper_full_get_segment_t1(ctx, i);
+
+                    ++srt_seq;
+                    printf("%d\n", srt_seq);
+                    printf("%s --> %s\n", to_timestamp(t0, true).c_str(), to_timestamp(t1, true).c_str());
+                    printf("%s\n\n", text);
+                    fflush(stdout);
+
+                    if (params.fname_out.length() > 0) {
+                        fout << srt_seq << "\n";
+                        fout << to_timestamp(t0, true) << " --> " << to_timestamp(t1, true) << "\n";
+                        fout << text << "\n\n";
+                        fout.flush();
+                    }
+                } else if (params.no_timestamps) {
                     printf("%s", text);
                     fflush(stdout);
 
@@ -697,7 +715,7 @@ int main(int argc, char ** argv) {
                 fout << std::endl;
             }
 
-            if (use_vad) {
+            if (!params.output_srt && use_vad) {
                 printf("\n");
                 printf("### Transcription %d END\n", n_iter);
             }
